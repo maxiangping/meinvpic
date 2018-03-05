@@ -10,7 +10,7 @@ var http = require("http"),
 	config = require('./config.js');
 
 var superagent = install(request);
-var connection = mysql.createConnection(config);
+
 // update statment
 var sql = `insert into user(
 	workCity,
@@ -36,13 +36,14 @@ var sql = `insert into user(
 var catchFirstUrl = "http://search.zhenai.com/v2/search/pinterest.do", //入口页面
 	catchDate = [], //存放爬取数据
 	pageUrls = [], //存放所有url
-	pageNum = 5, //要爬取的页数
+	pageNum = 20, //要爬取的页数
 	dir = './images',//本地存储目录
 	deleteRepeat = [],
 	downloadCount = 0,//下载的所有图片
 	startDate = new Date(), //开始时间
 	promiseArrays = [],//存放所有的promise
 	endDate = false; //结束时间
+	var sqlData = [];
 
 for (var i = 1; i <= pageNum; i++) {
 	pageUrls.push("http://search.zhenai.com/v2/search/getPinterestData.do?sex=1&agebegin=18&ageend=33&workcityprovince=10101000&workcitycity=10101204&marriage=1&marriage=4&h1=-1&h2=-1&salaryBegin=-1&salaryEnd=-1&occupation=-1&h=-1&c=-1&workcityprovince1=-1&workcitycity1=-1&constellation=-1&animals=-1&stock=-1&belief=-1&condition=66&orderby=hpf&hotIndex=0&online=&currentpage="+i+"&topSearch=true");
@@ -77,6 +78,16 @@ var isRepeat = function (authorName) {
 }
 //打印结果
 var printResult = function (res, err, result) {
+	var connection = mysql.createConnection(config);
+	// 保存数据到数据库
+	connection.query(sql, [sqlData], (error, results, fields) => {
+		if (error){
+			return console.error(error.message);
+		}
+		console.log('保存到数据库的条数:', results.affectedRows);
+	});
+	connection.end();
+
 	endDate = new Date();
 
 	console.log("final:");
@@ -120,46 +131,7 @@ var getURL = function (pageUrl) {
 	});
 }
 
-//控制并发数
-var curCount = 0;
-var reptileMove = function (res, dataItem, callback) {
-	var memberId = dataItem.memberId;
-	//拼凑详情页url
-	var detailUrl = "http://album.zhenai.com/u/"+memberId+"?flag=s";
-	//延迟毫秒数
-	var delay = parseInt((Math.random() * 30000000) % 1000, 10);
-	curCount++;
-	console.log("现在的并发数是", curCount, "，正在下载的是", detailUrl, "，耗时" + delay + "毫秒");
-	res.write(detailUrl + "<br/>");
-	
-	request
-		.get(detailUrl)
-		.set(headers)
-		.then(function (pres, err) {
-		// 常规的错误处理
-		if (err) {
-			console.log(err);
-			return;
-			}
-		var $ = cheerio.load(pres.text);
-		var imgs = $("#AblumsThumbsListID img.hidden");
-		for (var i = 0; i < imgs.length; i++){
-			var imgUrl = $(imgs[i]).attr('src');
-			var flag = isRepeat(imgUrl);
-			if (!flag) {
-				downloadCount++;
-				//下载图片
-				download(imgUrl, dir, memberId + "-" + i);
-			}
-			
-		}	
-	});
 
-	setTimeout(function() {
-		curCount--;
-		callback(null, detailUrl + "Call back content");
-	}, delay);
-}
 
 // 主start程序
 function start() {
@@ -178,41 +150,79 @@ function start() {
 			// 要下载的所有图片链接
 			res.write("要下载的所有图片链接：<br/>");
 
-			results.forEach(function(listData){
+			results.forEach(function(listData,index){
 				var text = JSON.parse(listData.text);
-				var sqlData = [];	
+					
 				text.data.forEach(function (item) {
 					catchDate.push(item);
 					delete item.introduceContent;
 					sqlData.push(Object.values(item));
 				});
-				
-				// 保存数据到数据库
-				connection.query(sql, [sqlData], (error, results, fields) => {
-					if (error){
-						return console.error(error.message);
-					}
-					console.log('保存到数据库的条数:', results.affectedRows);
-				});
 
+				if (index == results.length - 1) {
+					//控制并发数
+					var curCount = 0;
+					var reptileMove = function (dataItem, callback) {
+						var memberId = dataItem.memberId;
+						//拼凑详情页url
+						var detailUrl = "http://album.zhenai.com/u/"+memberId+"?flag=s";
+						//延迟毫秒数
+						var delay = parseInt((Math.random() * 30000000) % 1000, 10);
+						curCount++;
+						console.log("现在的并发数是", curCount, "，正在下载的是", detailUrl, "，耗时" + delay + "毫秒");
+						res.write(detailUrl + "<br/>");
+						
+						superagent
+							.get(detailUrl)
+							.set(headers)
+							.then(function (pres, err) {
+							// 常规的错误处理
+							if (err) {
+								console.log(err);
+								return;
+							}
+							var $ = cheerio.load(pres.text);
+							var imgs = $("#AblumsThumbsListID img.hidden");
+							for (var i = 0; i < imgs.length; i++){
+								var imgUrl = $(imgs[i]).attr('src');
+								var flag = isRepeat(imgUrl);
+								if (!flag) {
+									downloadCount++;
+									//下载图片
+									download(imgUrl, dir, memberId + "-" + i);
+								}
+								
+							}	
+						});
 
-				/* 
-					使用async控制异步抓取
-					mapLimit(arr, limit, iterator, [callback])
-					异步回调
-				*/
-				async.mapLimit(
-					catchDate,
-					5,
-					function(dataItem, callback) {
-						reptileMove(res, dataItem, callback);
-					},
-					function (err, result) {
-						printResult(res, err, result);
+						setTimeout(function() {
+							curCount--;
+							callback(null, detailUrl + "Call back content");
+						}, delay);
 					}
-				);
+
+					
+
+					/* 
+						使用async控制异步抓取
+						mapLimit(arr, limit, iterator, [callback])
+						异步回调
+					*/
+					async.mapLimit(
+						catchDate,
+						5,
+						function(dataItem, callback) {
+							reptileMove(dataItem, callback);
+						},
+						function (err, result) {
+							printResult(res, err, result);
+						}
+					);
+				}
 			});
-			connection.end();
+
+			
+			
 			
 		}).catch(function(err){
 			console.log(err);
